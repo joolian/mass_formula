@@ -12,6 +12,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from requests.exceptions import RetryError, ConnectionError, JSONDecodeError
+import inflection
 
 
 class ChemCalcFormulaFinder:
@@ -21,10 +22,11 @@ class ChemCalcFormulaFinder:
     url = 'https://www.chemcalc.org/chemcalc/em'
 
     df_columns = [
-        'em', 'mf', 'unsat', 'jcampURL', 'error', 'ppm', 'info', 'minMass', 'mfRange', 'numberOfResultsOnly', 'typedResult',
-        'minUnsaturation', 'maxUnsaturation', 'useUnsaturation', 'jcampBaseURL', 'monoisotopicMass', 'jcampLink',
-        'integerUnsaturation', 'maxMass', 'referenceVersion', 'massRange', 'charge', 'number_results', 'search_number', 'accuracy',
-        'error_description'
+        'search_mass', 'search_number', 'numberResults', 'em', 'mf', 'monoisotopicMass',
+        'error', 'ppm', 'unsat', 'jcampURL', 'info', 'minMass', 'maxMass', 'massRange', 'mfRange',
+        'numberOfResultsOnly', 'typedResult', 'minUnsaturation', 'maxUnsaturation', 'useUnsaturation',
+        'integerUnsaturation', 'referenceVersion', 'charge', 'jcampBaseURL', 'jcampLink',
+        'bruteForceIteration', 'realIteration', 'error_description',
     ]
 
     def __init__(
@@ -50,11 +52,11 @@ class ChemCalcFormulaFinder:
         )
         self._session.mount("http://", adapter)
 
-    def results_meta_data(self, json):
+    def _results_meta_data(self, json):
         meta = {key: value for (key, value) in json.items() if not isinstance(value, (dict, list))}
         return {**json['options'], **meta, **json['error']}
 
-    def json_to_dataframe(self, formulas_json):
+    def _json_to_dataframe(self, formulas_json):
         """ converts the json returned by the formula search to a pandas DataFrame"""
         df = pd.DataFrame(columns=ChemCalcFormulaFinder.df_columns)
         if formulas_json['error']['error_description'] is not None:
@@ -64,7 +66,7 @@ class ChemCalcFormulaFinder:
                 pd.DataFrame([formulas_json['error']])
             ])
 
-        meta_data = self.results_meta_data(formulas_json)
+        meta_data = self._results_meta_data(formulas_json)
         if not formulas_json['results']:
             return pd.concat([df, pd.DataFrame(meta_data)])
         else:
@@ -75,7 +77,7 @@ class ChemCalcFormulaFinder:
             df[list(meta_data.keys())] = list(meta_data.values())
             return df
 
-    def get_formulas(self, mass, accuracy, mf_range, charge):
+    def _get_formulas(self, mass, accuracy, mf_range, charge):
         """finds the possible formulas for a mass"""
         mf_range = f'{mf_range}({charge})'
         params = {
@@ -95,6 +97,7 @@ class ChemCalcFormulaFinder:
         try:
             results = self._session.get(ChemCalcFormulaFinder.url, params=params, timeout=5).json()
             results['error'] = {'error_description': None}
+            results['search_mass'] = mass
             return results
         except (RetryError, ConnectionError) as err:
             fatal_error = True
@@ -106,10 +109,8 @@ class ChemCalcFormulaFinder:
             'error': {
                 'fatal': fatal_error,
                 'error_description': error_description,
-                'em': mass,
-                'accuracy': accuracy,
+                'search_mass': mass,
                 'mfRange': mf_range,
-                'charge': charge
             }
         }
 
@@ -128,11 +129,12 @@ class ChemCalcFormulaFinder:
             params = zip([mass], [accuracy], [mf_range], [charge])
         results = []
         for index, (mz, accuracy, mf_range, charge) in enumerate(params):
-            formulas_json = self.get_formulas(mz, accuracy, mf_range, charge)
-            result = self.json_to_dataframe(formulas_json)
+            formulas_json = self._get_formulas(mz, accuracy, mf_range, charge)
+            result = self._json_to_dataframe(formulas_json)
             result['search_number'] = index
             results.append(result)
             if formulas_json['error'].get('fatal_error', False):
+                print('There was a fatal error. See results for details.')
                 break
         return pd.concat(results)
 
@@ -172,4 +174,6 @@ if __name__ == '__main__':
     data = pd.DataFrame(data={'mz': masses, 'mass_accuracy': mass_accuracy, 'mf_range': mf_range, 'charge': charge})
     result = finder.formulas(data.mz, data.mass_accuracy, data.mf_range, data.charge)
     result.to_csv('results.csv')
+    result.columns = [inflection.underscore(col) for col in result.columns.values]
+
     print(result)
